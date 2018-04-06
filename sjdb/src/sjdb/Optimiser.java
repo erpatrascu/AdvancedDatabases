@@ -7,35 +7,34 @@ import java.util.List;
 import java.util.ListIterator;
 import java.util.Set;
 
-
-
-
 public class Optimiser{
 	private Catalogue catalogue;
+
+	private List<Predicate> predicates = new ArrayList<Predicate>(); //used to push the selects down
+	private List<Attribute> attributes = new ArrayList<Attribute>(); //used to keep track of what attributes are used
 	
-	private List<Scan> scans = new ArrayList<Scan>();
-	private List<Product> products = new ArrayList<Product>();
-	private List<Predicate> predicates = new ArrayList<Predicate>();
-	private List<Attribute> attributes = new ArrayList<Attribute>();
+	private List<Operator> ilst = new ArrayList<Operator>(); //the initial list of operators
+	private List<Operator> olst = new ArrayList<Operator>(); //the optimised list of operators
 	
-	private List<Operator> ilst = new ArrayList<Operator>();
-	
-	private Estimator estimator = new Estimator();
+	private Estimator estimator = new Estimator(); 
+	private Boolean isFinalProject = false; //used in the case of 'select *' as input
 	
 	public Optimiser(Catalogue catalogue){
 		this.catalogue = catalogue;
 	}
 
-	
-	
+	/**
+	 * returns the optimised query plan (doesnt re-order joins)
+	 * @param cPlan
+	 * @return
+	 */
 	public Operator optimise(Operator cPlan){
 		
 		parseCanonicalQuery(cPlan);
-		List<Operator> olst = transformQueryPlan();
-		System.out.println(olst);
+		transformQueryPlan(cPlan);
+		Operator optimisedPlan = olst.get(olst.size()-1);
 		
-		
-		return null;
+		return optimisedPlan;
 	}
 
 	
@@ -51,13 +50,12 @@ public class Optimiser{
 		//adds to the specific list and may call the method again
 		if(op instanceof Scan){
 			ilst.add((Scan)op);
-			System.out.println("SCAN");
 		} else if (op instanceof Project) {
 			for (Attribute attribute: (((Project) op).getAttributes())){
 				attributes.add(attribute);
 			}
 			ilst.add((Project)op);
-			System.out.println("PROJECT");
+			isFinalProject = true;
 			parseCanonicalQuery(((Project) op).getInput());
 		} else if (op instanceof Select){
 			Predicate predicate = ((Select) op).getPredicate();
@@ -69,28 +67,27 @@ public class Optimiser{
 		    }
 		    
 		    ilst.add((Select)op);
-		    System.out.println("SELECT");
 		    parseCanonicalQuery(((Select) op).getInput());
 		} else if (op instanceof Product){
-			//products.add(new Product(((Product) op).getLeft(), ((Product) op).getRight()));
 			ilst.add((Product)op);
-			System.out.println("PRODUCT");
-			//estimator.visit(products.get(products.size()-1));
 			parseCanonicalQuery(((Product) op).getLeft());
 			parseCanonicalQuery(((Product) op).getRight());
-		} else if (op instanceof Join){
-			
 		} 
 	}
 	
-	
-	public List<Operator> transformQueryPlan(){
+	/**
+	 * optimises the query plan
+	 * does the optimisation of each operator one by one
+	 * @param cPlan original query plan
+	 */
+	public void transformQueryPlan(Operator cPlan){
 		Collections.reverse(ilst);
-		List<Operator> olst = new ArrayList<Operator>();
-		Boolean movedSelect = false;
 		
-		System.out.println(ilst.size());
+		Boolean movedSelect = false;		
 		
+		if(!isFinalProject) {
+			getAllAttributes(cPlan, attributes);
+		}
 		
 		for(Operator op : ilst){
 			if(op instanceof Scan){
@@ -111,7 +108,6 @@ public class Optimiser{
 					}
 				}
 				
-				
 				movedSelect = false;
 				
 				//going through all the predicates to check if a select can be pushed down on top of this scan
@@ -128,7 +124,6 @@ public class Optimiser{
 					    	
 					    	//checks if the predicate refers to this scan
 							if(containsAttribute(op.getOutput(), lAttr)){
-								
 								
 								//if there is already a select pushed down to the scan, build new selects on top of it
 								if(movedSelect){
@@ -148,15 +143,10 @@ public class Optimiser{
 					if(movedSelect){
 						//if you project all attributes there's no need to add a project operator
 						if(projectAllAttrs){
-							//olst.add(scan);
 							olst.add(select);
-							System.out.println(select);
 						} else {
 							Project project = new Project(select, attrToProject);
-							//olst.add(scan);
-							//olst.add(select);
 							olst.add(project);
-							System.out.println(project);
 						}
 						
 					}					
@@ -167,27 +157,20 @@ public class Optimiser{
 					//if you project all attributes there's no need to add a project operator
 					if(projectAllAttrs){
 						olst.add(scan);
-						System.out.println(scan);
 					} else {
 						Project project = new Project(scan, attrToProject);
 						olst.add(project);
-						System.out.println(project);
 					}
-				}
-				
-				
-				
+				}	
 			} else if (op instanceof Project) {
-				//Project project = new Project(((Project) op).getInput(), ((Project) op).getAttributes());
-				//System.out.println("Project " + pattributes.toString());
-				//olst.add(project);
-				//System.out.println(project);
 				continue;
 			} else if (op instanceof Select){
 				continue;
 			} else if (op instanceof Product){
 				movedSelect = false;
-				Product product = new Product(((Product) op).getLeft(), ((Product) op).getRight());
+				Product product = new Product(getOperator(((Product) op).getLeft()), getOperator(((Product) op).getRight()));
+
+				product.accept(estimator);
 				estimator.visit(product);
 				
 				if (!predicates.isEmpty()){
@@ -216,20 +199,18 @@ public class Optimiser{
 
 									//combine product and select into a join
 									join = new Join(product.getLeft(), product.getRight(), predicate);
+									join.accept(estimator);
 									estimator.visit(join);
 									
 									movedSelect = true;
 								}
 								
-
 								//remove the join attributes from the list of remaining attributes needed in the plan	
 								attributes.remove(lAttr);
 								attributes.remove(rAttr);
 
 								iter.remove();
-							}
-
-							
+							}	
 						}
 					}
 					
@@ -247,10 +228,8 @@ public class Optimiser{
 						if(countLAttr>0 && countRAttr>0){
 							if(select == null){
 								olst.add(join);
-								System.out.println(join);
 							} else {
 								olst.add(select);
-								System.out.println(select);
 							}
 							
 						} else {
@@ -262,7 +241,6 @@ public class Optimiser{
 							} 
 							
 							Project project = null;
-							//join.setOutput(null);
 							if(select == null){
 								project = new Project(join, attrToProject);
 							} else {
@@ -270,28 +248,83 @@ public class Optimiser{
 							}
 							
 							olst.add(project);
-							System.out.println(project);
 						}
 					}
-					
-					
 				}
 				
 				//if there was no select operation pushed down on top of product, then just add the product
 				if(!movedSelect){
-					//need to check if this works well
-					//product.setOutput(null);
 					olst.add(product);
-					System.out.println(product);
 				}
 			}
 		}
-		
-		return olst;
-		
 	}
 
+	/**
+	 * used as helper function, gets all scans present in an operator
+	 * @param op operator
+	 * @param allScans a set of scans
+	 */
+	private void getAllScans(Operator op, Set<String> allScans){
+		
+		if(op instanceof Scan){
+			allScans.add(((Scan) op).getRelation().toString());
+		} else if(op instanceof UnaryOperator){
+			getAllScans(((UnaryOperator) op).getInput(), allScans);
+		} else {
+			getAllScans(op.getInputs().get(0), allScans);
+			getAllScans(op.getInputs().get(1), allScans);
+		}
+	}
 	
+	/**
+	 * to get all attributes of an operator
+	 * used in the case when all the attributes are projected
+	 * @param op
+	 * @param allAttributes
+	 */
+	private void getAllAttributes(Operator op, List<Attribute> allAttributes){
+		if(op instanceof Scan){
+			for (Attribute attribute:((Scan) op).getRelation().getAttributes()){
+				allAttributes.add(attribute);
+			}
+		} else if(op instanceof UnaryOperator){
+			getAllAttributes(((UnaryOperator) op).getInput(), allAttributes);
+		} else {
+			getAllAttributes(op.getInputs().get(0), allAttributes);
+			getAllAttributes(op.getInputs().get(1), allAttributes);
+		}
+	}
+	
+	
+	/**
+	 * gets the operator that corresponds to the changed versions of the inputs to a product or join
+	 * used to create the final operator
+	 * @param op operator
+	 * @return
+	 */
+	private Operator getOperator(Operator op){
+		Set<String> allScans = new HashSet<String>();
+		getAllScans(op, allScans);
+		
+		for(Operator operator:olst){
+			Set<String> allScansOpt = new HashSet<String>();
+			getAllScans(operator, allScansOpt);
+			if(allScans.equals(allScansOpt)){
+				return operator;
+			}
+		}
+		return null;
+		
+	}
+	
+	
+	 /**
+	  * checks if a relation contains a certain attribute
+	  * @param rel relation
+	  * @param attr attribute
+	  * @return
+	  */
 	private Boolean containsAttribute(Relation rel, Attribute attr){
 		for (Attribute a : rel.getAttributes()){
 			if(a.getName().equals(attr.getName())){
@@ -301,6 +334,11 @@ public class Optimiser{
 		return false;
 	}
 	
+	/**
+	 * creates a list of attribute names from a list of attributes
+	 * @param attrs
+	 * @return
+	 */
 	private List<String> getAttributeNames(List<Attribute> attrs){
 		List<String> attrNames = new ArrayList<String>();
 		for (Attribute a:attrs){

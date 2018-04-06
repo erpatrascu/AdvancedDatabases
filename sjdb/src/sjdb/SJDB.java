@@ -33,5 +33,7 @@ public class SJDB {
 		// create optimised plan
 		Optimiser opt = new Optimiser(cat);
 		Operator optPlan = opt.optimise(plan);
+		optPlan.accept(est);
+		optPlan.accept(insp);
 	}
 }
