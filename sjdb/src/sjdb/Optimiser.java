@@ -33,6 +33,8 @@ public class Optimiser{
 		parseCanonicalQuery(cPlan);
 		List<Operator> olst = transformQueryPlan();
 		System.out.println(olst);
+		
+		
 		return null;
 	}
 
@@ -115,6 +117,8 @@ public class Optimiser{
 				//going through all the predicates to check if a select can be pushed down on top of this scan
 				if (!predicates.isEmpty()){
 					ListIterator<Predicate> iter = predicates.listIterator();
+					
+					Select select = null;
 					while(iter.hasNext()){
 						Predicate predicate = iter.next();
 						
@@ -125,26 +129,37 @@ public class Optimiser{
 					    	//checks if the predicate refers to this scan
 							if(containsAttribute(op.getOutput(), lAttr)){
 								
-								//push down the select to the scan
-								Select select = new Select(scan, predicate);
 								
-								//if you project all attributes there's no need to add a project operator
-								if(projectAllAttrs){
-									//olst.add(scan);
-									olst.add(select);
-									System.out.println(select);
+								//if there is already a select pushed down to the scan, build new selects on top of it
+								if(movedSelect){
+									select = new Select(select, predicate);
 								} else {
-									Project project = new Project(select, attrToProject);
-									//olst.add(scan);
-									//olst.add(select);
-									olst.add(project);
-									System.out.println(project);
+									//push down the select to the scan
+									select = new Select(scan, predicate);
+									movedSelect = true;
 								}
-								movedSelect = true;
+								
 								iter.remove();
 							}
 					    }
 					}
+					
+					//to make sure select is not null
+					if(movedSelect){
+						//if you project all attributes there's no need to add a project operator
+						if(projectAllAttrs){
+							//olst.add(scan);
+							olst.add(select);
+							System.out.println(select);
+						} else {
+							Project project = new Project(select, attrToProject);
+							//olst.add(scan);
+							//olst.add(select);
+							olst.add(project);
+							System.out.println(project);
+						}
+						
+					}					
 				}
 				
 				if(!movedSelect){
@@ -176,9 +191,11 @@ public class Optimiser{
 				estimator.visit(product);
 				
 				if (!predicates.isEmpty()){
-					Boolean checked = false;
 					ListIterator<Predicate> iter = predicates.listIterator();
-					while(iter.hasNext() && !checked){
+					
+					Select select = null;
+					Join join = null;
+					while(iter.hasNext()){
 						Predicate predicate = iter.next();
 						
 						//check if it's a attr1=attr2 predicate
@@ -189,54 +206,81 @@ public class Optimiser{
 							Relation prod = product.getOutput();
 							if(containsAttribute(prod, lAttr) && containsAttribute(prod, rAttr)){
 
-								//product.setOutput(null);
-								//create a new select on top of prod and add both to olst
-								//instead of that ^ I combined them to a join
-								//Select select = new Select(product, predicate);
-								Join join = new Join(product.getLeft(), product.getRight(), predicate);
-								estimator.visit(join);
+								if(movedSelect){
+									if(select == null){
+										select = new Select(join, predicate);
+									} else {
+										select = new Select(select, predicate);
+									} 
+								} else {
+
+									//combine product and select into a join
+									join = new Join(product.getLeft(), product.getRight(), predicate);
+									estimator.visit(join);
+									
+									movedSelect = true;
+								}
 								
+
 								//remove the join attributes from the list of remaining attributes needed in the plan	
 								attributes.remove(lAttr);
 								attributes.remove(rAttr);
-								
-								//list of names for easier comparison
-								List<Attribute> attrToProject = new ArrayList<Attribute>();
-								List<String> attrNames = getAttributeNames(attributes);
-								
-								int countLAttr = Collections.frequency(attrNames, lAttr.getName());
-								int countRAttr = Collections.frequency(attrNames, rAttr.getName());
-								
-								
-								//if the 2 attributes in the join predicate are used somewhere else
-								//then don't project anything; else project the rest of the attributes
-								if(countLAttr>0 && countRAttr>0){
-									olst.add(join);
-									System.out.println(join);
-								} else {
-									//selecting the list of attributes to project on top of join
-									for(Attribute a : join.getOutput().getAttributes()){
-										if(attrNames.contains(a.getName())){
-											attrToProject.add(new Attribute(a));
-										} 
-									} 
-									
-									join.setOutput(null);
-									Project project = new Project(join, attrToProject);
-									olst.add(project);
-									System.out.println(project);
-								}
-								
-								movedSelect = true;
-								checked = true;
+
 								iter.remove();
 							}
-					    }
+
+							
+						}
 					}
+					
+					if(movedSelect){
+						//list of names for easier comparison
+						List<Attribute> attrToProject = new ArrayList<Attribute>();
+						List<String> attrNames = getAttributeNames(attributes);
+						
+						int countLAttr = Collections.frequency(attrNames, join.getPredicate().getLeftAttribute().getName());
+						int countRAttr = Collections.frequency(attrNames, join.getPredicate().getRightAttribute().getName());
+						
+						
+						//if the 2 attributes in the join predicate are used somewhere else
+						//then don't project anything; else project the rest of the attributes
+						if(countLAttr>0 && countRAttr>0){
+							if(select == null){
+								olst.add(join);
+								System.out.println(join);
+							} else {
+								olst.add(select);
+								System.out.println(select);
+							}
+							
+						} else {
+							//selecting the list of attributes to project on top of join
+							for(Attribute a : join.getOutput().getAttributes()){
+								if(attrNames.contains(a.getName())){
+									attrToProject.add(new Attribute(a));
+								} 
+							} 
+							
+							Project project = null;
+							//join.setOutput(null);
+							if(select == null){
+								project = new Project(join, attrToProject);
+							} else {
+								project = new Project(select, attrToProject);
+							}
+							
+							olst.add(project);
+							System.out.println(project);
+						}
+					}
+					
+					
 				}
 				
 				//if there was no select operation pushed down on top of product, then just add the product
 				if(!movedSelect){
+					//need to check if this works well
+					//product.setOutput(null);
 					olst.add(product);
 					System.out.println(product);
 				}
